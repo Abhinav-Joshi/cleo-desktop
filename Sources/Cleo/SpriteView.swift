@@ -18,7 +18,11 @@ final class SpriteView: NSView {
     private var hoverTracking: NSTrackingArea?
     var onPet: (() -> Void)?
     var onHover: (() -> Void)?
+    var onHoldBegan: (() -> Void)?
+    var onHoldEnded: (() -> Void)?
     var companionMenu: NSMenu?
+    private var holdTimer: Timer?
+    private var holdArmed = false
 
     override var isOpaque: Bool { false }
     override var acceptsFirstResponder: Bool { false }
@@ -133,10 +137,39 @@ final class SpriteView: NSView {
     override func mouseEntered(with event: NSEvent) { onHover?() }
     override func mouseMoved(with event: NSEvent) { onHover?() }
     override func mouseExited(with event: NSEvent) { onHover?() }
-    override func mouseDown(with event: NSEvent) { onPet?() }
+    override func mouseDown(with event: NSEvent) {
+        guard event.type == .leftMouseDown else { return }
+        holdArmed = false
+        holdTimer?.invalidate()
+        // A short click still pets. Holding still starts listening.
+        let timer = Timer(timeInterval: 0.22, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.holdArmed = true
+            self.onHoldBegan?()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        holdTimer = timer
+    }
+    override func mouseUp(with event: NSEvent) {
+        holdTimer?.invalidate()
+        holdTimer = nil
+        if holdArmed {
+            holdArmed = false
+            onHoldEnded?()
+            return
+        }
+        if containsDog(convert(event.locationInWindow, from: nil)) { onPet?() }
+    }
     override func mouseDragged(with event: NSEvent) {
+        if holdArmed { return }
         let now = ProcessInfo.processInfo.systemUptime
-        if now - lastStroke >= 0.1 && containsDog(convert(event.locationInWindow, from: nil)) { lastStroke = now; onPet?() }
+        let local = convert(event.locationInWindow, from: nil)
+        guard now - lastStroke >= 0.1, containsDog(local) else { return }
+        // A stroke is petting, so the hold does not also start listening.
+        holdTimer?.invalidate()
+        holdTimer = nil
+        lastStroke = now
+        onPet?()
     }
     override func menu(for event: NSEvent) -> NSMenu? { companionMenu }
 

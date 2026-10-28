@@ -28,6 +28,10 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Cleo uses the microphone only while you hold to talk or start listening, so your words can be transcribed on this Mac.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Cleo transcribes speech on this Mac with on-device recognition. Audio is not sent to a speech server.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>

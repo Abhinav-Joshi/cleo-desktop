@@ -14,7 +14,7 @@ struct PetBounds: Equatable {
 }
 
 enum PetMood: String, CaseIterable {
-    case idle, wag, walk, stick, run, catchBall, sleep, pet, sleepy, circleSleep, settleSleep, bark, sleepGreeting
+    case idle, wag, walk, stick, run, catchBall, sleep, pet, sleepy, circleSleep, settleSleep, bark, sleepGreeting, listen
 }
 
 enum CarriedToy: String {
@@ -38,6 +38,7 @@ final class CleoBehavior {
     private(set) var sleepCircleProgress: Double = 0
     private(set) var carriedToy: CarriedToy = .none
     private(set) var ballProgress: Double = 0
+    private(set) var isDictating = false
     var ballDestination: PetPoint { ballTarget }
     var home: PetPoint
 
@@ -105,6 +106,7 @@ final class CleoBehavior {
         case .sleep: return 0.75
         case .sleepy: return 0.5
         case .bark, .sleepGreeting: return 1.0 / 18.0
+        case .listen: return isReducedMotion ? 0.2 : 1.0 / 18.0
         case .catchBall: return isReducedMotion ? 0.25 : 1.0 / 24.0
         default: return isReducedMotion ? 0.25 : 1.0 / 18.0
         }
@@ -135,31 +137,34 @@ final class CleoBehavior {
 
         let motionChanged = reducedMotion != isReducedMotion
         isReducedMotion = reducedMotion
-        if evening != isEvening {
-            isEvening = evening
-            manualSleep = false
-            restAfterReturn = nil
-            if reducedMotion || distance(position, home) < 1 {
-                enterRest(now: now)
-            } else {
+        // Listening keeps the current pose. Evening and Reduce Motion apply once it ends.
+        if !isDictating {
+            if evening != isEvening {
+                isEvening = evening
+                manualSleep = false
+                restAfterReturn = nil
+                if reducedMotion || distance(position, home) < 1 {
+                    enterRest(now: now)
+                } else {
+                    beginReturn(now: now)
+                }
+            }
+
+            if reducedMotion {
+                returningHome = false
+                destination = nil
+                restAfterReturn = nil
+                if mood == .circleSleep || mood == .settleSleep {
+                    position = home
+                    enterRest(now: now, preferred: .sleep)
+                }
+                if mood == .walk || mood == .run || mood == .catchBall {
+                    carriedToy = .none
+                    setMood(isEvening ? .sleepy : .wag, now: now, duration: 4)
+                }
+            } else if motionChanged && distance(position, home) > 1 {
                 beginReturn(now: now)
             }
-        }
-
-        if reducedMotion {
-            returningHome = false
-            destination = nil
-            restAfterReturn = nil
-            if mood == .circleSleep || mood == .settleSleep {
-                position = home
-                enterRest(now: now, preferred: .sleep)
-            }
-            if mood == .walk || mood == .run || mood == .catchBall {
-                carriedToy = .none
-                setMood(isEvening ? .sleepy : .wag, now: now, duration: 4)
-            }
-        } else if motionChanged && distance(position, home) > 1 {
-            beginReturn(now: now)
         }
 
         if returningHome {
@@ -187,7 +192,7 @@ final class CleoBehavior {
                 setMood(.settleSleep, now: now, duration: 0.9)
             case .settleSleep:
                 enterRest(now: now, preferred: .sleep)
-            case .idle:
+            case .idle, .listen:
                 break
             }
         }
@@ -244,7 +249,7 @@ final class CleoBehavior {
     /// The view calls this once for each genuine pointer entry, including a fresh re-entry.
     @discardableResult
     func hovered(now: TimeInterval) -> Bool {
-        guard now.isFinite else { return false }
+        guard now.isFinite, !isDictating else { return false }
         let underlyingMood = interruptedActivity?.mood ?? mood
         let restingAtHome = (underlyingMood == .idle || underlyingMood == .wag) && distance(position, home) <= 2
         let sleepyGreeting = underlyingMood == .sleep || underlyingMood == .sleepy
@@ -268,6 +273,51 @@ final class CleoBehavior {
         destination = nil
         setMood(sleepyGreeting ? .sleepGreeting : .bark, now: now, duration: sleepyGreeting ? 2.4 : 0.95)
         return true
+    }
+
+    /// Holds a listening pose without walking. The activity underneath resumes afterward.
+    @discardableResult
+    func beginDictation(now: TimeInterval) -> Bool {
+        guard now.isFinite, !isDictating else { return false }
+        let now = max(now, lastTick)
+        lastTick = now
+        if interruptedActivity == nil {
+            interruptedActivity = InterruptedActivity(
+                mood: mood, facingLeft: facingLeft, animationTime: animationTime,
+                stateEnds: stateEnds, nextActivity: nextActivity, chaseBegan: chaseBegan,
+                nextEscapeTarget: nextEscapeTarget, destination: destination,
+                returningHome: returningHome, restAfterReturn: restAfterReturn,
+                manualSleep: manualSleep, sleepCircleProgress: sleepCircleProgress,
+                circleCenter: sleepCircleCenter, circleRadius: sleepCircleRadius,
+                circleStartAngle: sleepCircleStartAngle, carriedToy: carriedToy,
+                ballProgress: ballProgress, ballStart: ballStart, ballTarget: ballTarget)
+            greetingBegan = now
+        }
+        isDictating = true
+        returningHome = false
+        destination = nil
+        setMood(.listen, now: now, duration: .infinity)
+        return true
+    }
+
+    /// A successful listen plays one existing bark, then the saved activity continues.
+    func endDictation(now: TimeInterval, acknowledged: Bool) {
+        guard now.isFinite, isDictating else { return }
+        let now = max(now, lastTick)
+        lastTick = now
+        isDictating = false
+        if acknowledged {
+            setMood(.bark, now: now, duration: 0.95)
+            return
+        }
+        if !resumeInterruptedActivity(now: now) { finishActivity(now: now) }
+    }
+
+    /// Drops the listening pose and the saved activity. The caller chooses the next mood.
+    func cancelDictation() {
+        guard isDictating else { return }
+        isDictating = false
+        interruptedActivity = nil
     }
 
     private func resumeInterruptedActivity(now: TimeInterval) -> Bool {
@@ -302,7 +352,7 @@ final class CleoBehavior {
 
     /// Mouse coordinates use the same origin coordinate space as `position`.
     func clicked(now: TimeInterval, mouse: PetPoint) {
-        guard now.isFinite else { return }
+        guard now.isFinite, !isDictating else { return }
         let now = max(now, lastTick)
         lastTick = now
         interruptedActivity = nil
@@ -332,6 +382,7 @@ final class CleoBehavior {
         guard now.isFinite else { return }
         let now = max(now, lastTick)
         lastTick = now
+        if isDictating { cancelDictation() }
         interruptedActivity = nil
         manualSleep = requestedMood == .sleep || requestedMood == .circleSleep || requestedMood == .settleSleep
         if manualSleep && (mood == .circleSleep || mood == .settleSleep) { return }
@@ -355,6 +406,8 @@ final class CleoBehavior {
             startActivity(isReducedMotion ? .wag : requestedMood, now: now)
         case .wag, .stick, .pet, .sleepy, .bark, .sleepGreeting:
             startActivity(requestedMood, now: now)
+        case .listen:
+            beginDictation(now: now)
         }
     }
 
@@ -365,13 +418,13 @@ final class CleoBehavior {
         self.bounds = Self.normalized(bounds)
         self.home = Self.clamped(home, to: self.bounds)
         position = Self.clamped(position, to: self.bounds)
-        if mood == .bark || mood == .sleepGreeting {
+        destination = nil
+        nextEscapeTarget = 0
+        if mood == .bark || mood == .sleepGreeting || mood == .listen {
             if wasHome || isReducedMotion { position = self.home }
             interruptedActivity?.geometryChanged = true
             return
         }
-        destination = nil
-        nextEscapeTarget = 0
         if wasCatching {
             let safeNow = now.isFinite ? max(now, lastTick) : lastTick
             if wasHome || distance(position, self.home) < 1 {

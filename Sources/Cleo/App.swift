@@ -24,6 +24,21 @@ struct CleoMain {
                 userInfo: nil, deliverImmediately: true)
             return
         }
+        if CommandLine.arguments.contains("--self-check") {
+            exit(cleoSelfCheck() ? 0 : 1)
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--print-grok-url"), CommandLine.arguments.indices.contains(index + 1) {
+            if let url = GrokBotLink.promptURL(for: CommandLine.arguments[index + 1]) {
+                print(url.absoluteString)
+                exit(0)
+            }
+            fputs("unusable\n", stderr)
+            exit(1)
+        }
+        if CommandLine.arguments.contains("--speech-capability") {
+            print(OnDeviceSpeechListener.capabilityLine())
+            exit(OnDeviceSpeechListener.recognizerAvailable ? 0 : 1)
+        }
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let delegate = CleoApp()
@@ -56,6 +71,17 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var nextMoodBoundary: Date?
     private var commandObserver: NSObjectProtocol?
     private var recordingTimer: Timer?
+    private let speech = OnDeviceSpeechListener()
+    private let hotKey = TalkHotKey()
+    private let providers: [AgentProvider] = [GrokBotProvider()]
+    private var handoffNote: String?
+    private var captureStarted = false
+    private var permissionPromptOpen = false
+    private var holdOwnsCapture = false
+    private var activeProvider: AgentProvider {
+        let saved = defaults.string(forKey: "agentProvider")
+        return providers.first { $0.identifier == saved } ?? providers[0]
+    }
     private var hoverEntryConsumed = false
     private var lastHoverMouseLocation: NSPoint?
     private var hoverBarkCount = 0
@@ -110,6 +136,10 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sprite.autoresizingMask = [.width, .height]
         sprite.onPet = { [weak self] in self?.petCleo() }
         sprite.onHover = { [weak self] in self?.checkHover() }
+        sprite.onHoldBegan = { [weak self] in self?.holdToTalkBegan() }
+        sprite.onHoldEnded = { [weak self] in self?.holdToTalkEnded() }
+        hotKey.onPressed = { [weak self] in self?.toggleTalking() }
+        hotKey.install()
         sprite.companionMenu = menu
         let geometry = screenGeometry()
         behavior = CleoBehavior(bounds: geometry.0, home: geometry.1, now: now, evening: isEvening,
@@ -150,7 +180,7 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if panel.frame.origin != origin {
             panel.setFrameOrigin(origin)
         }
-        let resting = [.idle, .wag, .pet, .bark, .sleep, .sleepy, .sleepGreeting, .settleSleep, .circleSleep].contains(behavior.mood)
+        let resting = [.idle, .wag, .pet, .bark, .listen, .sleep, .sleepy, .sleepGreeting, .settleSleep, .circleSleep].contains(behavior.mood)
         let pointer = [.stick, .run].contains(behavior.mood) ? NSEvent.mouseLocation : NSPoint(x: panel.frame.midX, y: panel.frame.midY)
         let gaze = CGPoint(x: max(-1, min(1, (pointer.x - panel.frame.midX) / 160)),
                            y: max(-1, min(1, (pointer.y - panel.frame.midY) / 160)))
@@ -288,6 +318,7 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func request(_ mood: PetMood) {
+        abandonListening()
         visible = true
         paused = false
         snoozeTimer?.invalidate()
@@ -311,10 +342,20 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func rebuildMenu() {
         menu.removeAllItems()
-        let labels: [PetMood: String] = [.idle: "Keeping you company", .wag: "Happy to see you", .bark: "A little hello", .walk: "On a tiny adventure", .stick: "Found a very good stick", .run: "You can’t catch me!", .catchBall: "Ball time", .sleep: "Dreaming of tennis balls", .pet: "That’s the spot", .sleepy: "Getting sleepy", .sleepGreeting: "A sleepy hello", .circleSleep: "Finding the perfect sleeping spot", .settleSleep: "Curling up"]
+        let labels: [PetMood: String] = [.idle: "Keeping you company", .wag: "Happy to see you", .bark: "A little hello", .listen: "Listening", .walk: "On a tiny adventure", .stick: "Found a very good stick", .run: "You can’t catch me!", .catchBall: "Ball time", .sleep: "Dreaming of tennis balls", .pet: "That’s the spot", .sleepy: "Getting sleepy", .sleepGreeting: "A sleepy hello", .circleSleep: "Finding the perfect sleeping spot", .settleSleep: "Curling up"]
         let title = item("Cleo · \(labels[behavior.mood] ?? "Hanging out")")
         title.isEnabled = false
         menu.addItem(title)
+        if captureStarted {
+            menu.addItem(item("Stop and hand the words to \(activeProvider.displayName)", action: #selector(stopTalking)))
+        } else {
+            menu.addItem(item("Talk to \(activeProvider.displayName) (⌃⌥Space)", action: #selector(startTalking)))
+        }
+        if let handoffNote {
+            let note = item(handoffNote)
+            note.isEnabled = false
+            menu.addItem(note)
+        }
         menu.addItem(.separator())
         menu.addItem(item(visible ? "Hide Cleo" : "Show Cleo", action: #selector(toggleVisible)))
         menu.addItem(item(paused ? "Resume" : "Pause", action: #selector(togglePause)))
@@ -347,17 +388,119 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item("Quit Cleo", action: #selector(quit)))
     }
 
+    @objc private func startTalking() { toggleTalking() }
+    @objc private func stopTalking() { finishCapture(deliver: true) }
+
+    private func holdToTalkBegan() {
+        guard visible, !paused, suspended.isEmpty else { return }
+        holdOwnsCapture = true
+        beginCapture()
+    }
+
+    private func holdToTalkEnded() {
+        let owned = holdOwnsCapture
+        holdOwnsCapture = false
+        guard owned, captureStarted else { return }
+        finishCapture(deliver: true)
+    }
+
+    private func toggleTalking() {
+        if captureStarted { finishCapture(deliver: true) }
+        else { beginCapture() }
+    }
+
+    private func beginCapture() {
+        guard !captureStarted else { return }
+        guard visible, !paused, suspended.isEmpty else { return }
+        if !OnDeviceSpeechListener.permissionsGranted {
+            guard !permissionPromptOpen else { return }
+            permissionPromptOpen = true
+            handoffNote = "Asking for the microphone and speech recognition."
+            OnDeviceSpeechListener.requestAccess { [weak self] granted in
+                guard let self else { return }
+                self.permissionPromptOpen = false
+                self.handoffNote = granted
+                    ? "Permission is on. Hold Cleo or press ⌃⌥Space to talk."
+                    : "Turn on the microphone and speech recognition for Cleo in System Settings."
+                self.holdOwnsCapture = false
+            }
+            return
+        }
+        do {
+            try speech.start()
+        } catch let error as ListenError {
+            handoffNote = error.note
+            holdOwnsCapture = false
+            return
+        } catch {
+            handoffNote = ListenError.unavailable.note
+            holdOwnsCapture = false
+            return
+        }
+        captureStarted = true
+        handoffNote = nil
+        behavior.beginDictation(now: now)
+        statusItem.button?.image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Cleo is listening")
+        statusItem.button?.toolTip = "Cleo is listening. Release her, or press Control-Option-Space, to hand the words to \(activeProvider.displayName)."
+        updateFrame()
+        scheduleTimer()
+    }
+
+    private func finishCapture(deliver: Bool) {
+        guard captureStarted else { return }
+        captureStarted = false
+        holdOwnsCapture = false
+        statusItem.button?.image = NSImage(systemSymbolName: "pawprint.fill", accessibilityDescription: "Cleo companion")
+        statusItem.button?.toolTip = "Cleo — your little desktop doodle"
+        speech.stop { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .failure(let error):
+                self.behavior.endDictation(now: self.now, acknowledged: false)
+                self.handoffNote = error.note
+            case .success(let words) where deliver && !words.isEmpty:
+                self.behavior.endDictation(now: self.now, acknowledged: true)
+                self.handoffNote = "Handing words to \(self.activeProvider.displayName)…"
+                let provider = self.activeProvider
+                provider.deliver(text: words) { [weak self] outcome in
+                    self?.handoffNote = outcome.note
+                }
+            case .success:
+                self.behavior.endDictation(now: self.now, acknowledged: false)
+                if deliver { self.handoffNote = "Cleo didn't catch any words." }
+            }
+            self.updateFrame()
+            self.scheduleTimer()
+        }
+    }
+
+    /// Stops the microphone without opening another app. Used when a different action takes over.
+    private func abandonListening() {
+        guard captureStarted || permissionPromptOpen else { return }
+        let wasCapturing = captureStarted
+        captureStarted = false
+        holdOwnsCapture = false
+        permissionPromptOpen = false
+        speech.cancel()
+        if wasCapturing { behavior.cancelDictation() }
+        statusItem.button?.image = NSImage(systemSymbolName: "pawprint.fill", accessibilityDescription: "Cleo companion")
+        statusItem.button?.toolTip = "Cleo — your little desktop doodle"
+    }
+
     @objc private func toggleVisible() {
+        if visible { abandonListening() }
         visible.toggle()
         snoozeTimer?.invalidate()
         if visible && suspended.isEmpty { panel.orderFrontRegardless(); tick() }
         else { panel.orderOut(nil); stopTimer() }
     }
     @objc private func togglePause() {
+        if !paused { abandonListening() }
         paused.toggle()
         if paused { stopTimer() } else { tick() }
     }
     @objc private func snooze() {
+        abandonListening()
         visible = false
         panel.orderOut(nil)
         stopTimer()
@@ -478,6 +621,10 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 "ballWindowVisible": self.ballPanel.isVisible, "ballIgnoresMouseEvents": self.ballPanel.ignoresMouseEvents,
                 "ballCanBecomeKey": self.ballPanel.canBecomeKey, "ballKeyWindow": self.ballPanel.isKeyWindow,
                 "ballWindowReceivesHit": self.ballPanel.isVisible && NSWindow.windowNumber(at: NSPoint(x: self.ballPanel.frame.midX, y: self.ballPanel.frame.midY), belowWindowWithWindowNumber: 0) == self.ballPanel.windowNumber,
+                "dictating": self.behavior.isDictating, "captureStarted": self.captureStarted,
+                "hotKeyRegistered": self.hotKey.isRegistered,
+                "speechOnDeviceOnly": true, "grokBotInstalled": GrokBotLink.isInstalled,
+                "agentProvider": self.activeProvider.identifier,
                 "hoverEntryConsumed": self.hoverEntryConsumed, "hoverBarkCount": self.hoverBarkCount,
                 "hoverSleepGreetingCount": self.hoverSleepGreetingCount,
                 "pixelWidth": self.sprite.frames.first?.width ?? 0]
@@ -593,6 +740,8 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        abandonListening()
+        hotKey.remove()
         stopTimer()
         snoozeTimer?.invalidate()
         recordingTimer?.invalidate()
