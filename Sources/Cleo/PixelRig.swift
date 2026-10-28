@@ -183,13 +183,17 @@ final class PixelRig {
                 bone(1, pose.head, (sin(phase * 0.2) * 0.035 + sin(phase * 0.6) * 0.02) * motion,
                      0, sin(phase * 0.6) * 0.65 * motion)
             }
-        case .bark:
+        case .bark, .listen:
             if barking.count == 16 {
                 // The dedicated chronological clip moves the upper jaw, nose,
                 // eyes, and ears together. No synthetic lip warp is applied.
                 // The requested greeting remains visible in Gentle mode;
                 // the window and paws stay fixed throughout this short clip.
-                let index = min(15, Int(t / 0.95 * 16))
+                // Listening loops that clip. Reduce Motion plays it once and holds.
+                let clip = mood == .listen && !reducedMotion
+                    ? t.truncatingRemainder(dividingBy: 0.95)
+                    : min(t, 0.949)
+                let index = min(15, Int((mood == .bark ? t : clip) / 0.95 * 16))
                 pose = barking[index]
                 // A separate, strictly right-hand field keeps the animated
                 // bark head and ears completely outside the tail's influence.
@@ -370,7 +374,7 @@ final class PixelRig {
                 for channel in 0..<4 { output[to + channel] = source[from + channel] }
             }
         } }
-        if mood == .bark {
+        if mood == .bark || mood == .listen {
             // A warped tail outline can leave a solitary pixel at its old edge.
             // Clear only isolated bark pixels; connected head, body, and fur stay intact.
             let occupied = output

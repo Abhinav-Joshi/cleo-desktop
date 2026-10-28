@@ -59,7 +59,7 @@ for architecture in "${architectures[@]}"; do
     -O -whole-module-optimization -parse-as-library \
     -target "$architecture-apple-macosx14.0" -sdk "$sdk_path" \
     -module-cache-path "$build_root/ModuleCache" \
-    "${sources[@]}" -framework AppKit \
+    "${sources[@]}" -framework AppKit -framework ApplicationServices -framework AVFoundation -framework Speech -framework Carbon \
     -o "$staged_app/Contents/MacOS/Cleo-$architecture"
 done
 if [[ "$universal" == true ]]; then
