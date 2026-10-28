@@ -9,7 +9,7 @@ Created with the built-in image generator using Cleo's provided `IMG_0200.JPG`, 
 Regenerate runtime resources from the selected source, from the project directory:
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode_27.1_RC.app/Contents/Developer xcrun swift scripts/prepare-art.swift Artwork/cleo-pixel-source.png Resources
+xcrun swift scripts/prepare-art.swift Artwork/cleo-pixel-source.png Resources
 /usr/bin/iconutil -c icns Artwork/Cleo.iconset -o Resources/Cleo.icns
 ./scripts/build.sh --install
 ```
@@ -37,7 +37,7 @@ Hover starts this bark only from the seated `idle` or `wag` mood at Cleo's home 
 From the project directory, prepare the runtime resources with:
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode_27.1_RC.app/Contents/Developer xcrun swift scripts/prepare-bark.swift Artwork/cleo-bark-source.png Resources/cleo-00.png Resources
+xcrun swift scripts/prepare-bark.swift Artwork/cleo-bark-source.png Resources/cleo-00.png Resources
 ./scripts/build.sh --install
 ```
 

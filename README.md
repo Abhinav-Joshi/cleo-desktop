@@ -28,7 +28,7 @@ The app uses AppKit and local artwork. It has no web runtime, network calls, acc
 
 ### Build and run
 
-The app requires macOS 14 or later. The default local build targets Apple silicon; the friend download is universal and supports Apple silicon and Intel Macs. Building requires a working Xcode or Command Line Tools installation. The scripts first honor an explicit `DEVELOPER_DIR`, then try the known working Xcode installation and Command Line Tools. They never change the global developer selection.
+The app requires macOS 14 or later. The default local build targets Apple silicon; the friend download is universal and supports Apple silicon and Intel Macs. Building requires a working Xcode or Command Line Tools installation. The scripts honor an explicit `DEVELOPER_DIR` when it is set. Otherwise they try Command Line Tools, then the developer directory selected by `xcode-select`. They never change the global developer selection.
 
 From this directory:
 
@@ -44,7 +44,7 @@ The result is `build/Cleo.app`, signed locally with an ad hoc signature. Buildin
 
 Installation does not launch Cleo. Any existing `~/Applications/Cleo.app` is moved into `~/Applications/Cleo Backups` before replacement. To remove Cleo, quit it through its menu and delete the app; remove its `local.cleo.companion` preferences separately if you want to reset saved choices.
 
-For a universal friend download, run `./scripts/package.sh`. It builds both native architectures and produces a ZIP, installation instructions, SHA-256 checksum, and metadata under `build/distribution/`, without installing, launching, or publishing anything. Use `./scripts/package.sh --skip-build` to package an already built universal app. See [DISTRIBUTION.md](DISTRIBUTION.md) for the preview's signing status and delivery details.
+For a universal friend download, run `./scripts/package.sh`. It builds both native architectures and produces a ZIP, installation instructions, SHA-256 checksum, and metadata under `build/distribution/`, without installing, launching, or publishing anything. Use `./scripts/package.sh --skip-build` to package an already built universal app.
 
 ### Controls and behavior
 

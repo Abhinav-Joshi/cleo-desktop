@@ -22,16 +22,20 @@ if [[ -n "${DEVELOPER_DIR:-}" ]]; then
     exit 1
   fi
 else
-  for candidate in /Applications/Xcode_27.1_RC.app/Contents/Developer /Library/Developer/CommandLineTools; do
-    if DEVELOPER_DIR="$candidate" /usr/bin/xcrun --find swiftc >/dev/null 2>&1; then
-      export DEVELOPER_DIR="$candidate"
-      break
+  developer_dir=""
+  command_line_tools="/Library/Developer/CommandLineTools"
+  if DEVELOPER_DIR="$command_line_tools" /usr/bin/xcrun --find swiftc >/dev/null 2>&1; then
+    developer_dir="$command_line_tools"
+  elif selected_dir="$(/usr/bin/xcode-select -p 2>/dev/null)" && [[ -n "$selected_dir" && "$selected_dir" != "$command_line_tools" ]]; then
+    if DEVELOPER_DIR="$selected_dir" /usr/bin/xcrun --find swiftc >/dev/null 2>&1; then
+      developer_dir="$selected_dir"
     fi
-  done
-  if [[ -z "${DEVELOPER_DIR:-}" ]]; then
+  fi
+  if [[ -z "$developer_dir" ]]; then
     printf 'A working Xcode or Command Line Tools installation is required. Set DEVELOPER_DIR explicitly.\n' >&2
     exit 1
   fi
+  export DEVELOPER_DIR="$developer_dir"
 fi
 
 build_root="$project_root/build"

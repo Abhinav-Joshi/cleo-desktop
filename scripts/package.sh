@@ -15,12 +15,18 @@ esac
 if [[ $# -gt 1 ]]; then printf 'Expected at most one argument.\n' >&2; exit 2; fi
 
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
-  for candidate in /Applications/Xcode_27.1_RC.app/Contents/Developer /Library/Developer/CommandLineTools; do
-    if DEVELOPER_DIR="$candidate" /usr/bin/xcrun --find lipo >/dev/null 2>&1; then
-      export DEVELOPER_DIR="$candidate"
-      break
+  developer_dir=""
+  command_line_tools="/Library/Developer/CommandLineTools"
+  if DEVELOPER_DIR="$command_line_tools" /usr/bin/xcrun --find lipo >/dev/null 2>&1; then
+    developer_dir="$command_line_tools"
+  elif selected_dir="$(/usr/bin/xcode-select -p 2>/dev/null)" && [[ -n "$selected_dir" && "$selected_dir" != "$command_line_tools" ]]; then
+    if DEVELOPER_DIR="$selected_dir" /usr/bin/xcrun --find lipo >/dev/null 2>&1; then
+      developer_dir="$selected_dir"
     fi
-  done
+  fi
+  if [[ -n "$developer_dir" ]]; then
+    export DEVELOPER_DIR="$developer_dir"
+  fi
 fi
 if [[ "$skip_build" == false ]]; then "$project_root/scripts/build.sh" --universal; fi
 
