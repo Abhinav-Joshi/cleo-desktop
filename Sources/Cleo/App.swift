@@ -39,6 +39,10 @@ struct CleoMain {
             print(OnDeviceSpeechListener.capabilityLine())
             exit(OnDeviceSpeechListener.recognizerAvailable ? 0 : 1)
         }
+        if CommandLine.arguments.contains("--send-plan") {
+            print(GrokBotSend.planLine())
+            return
+        }
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let delegate = CleoApp()
@@ -78,6 +82,8 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var captureStarted = false
     private var permissionPromptOpen = false
     private var holdOwnsCapture = false
+    private var pendingSend: DispatchWorkItem?
+    private var pendingWords: String?
     private var activeProvider: AgentProvider {
         let saved = defaults.string(forKey: "agentProvider")
         return providers.first { $0.identifier == saved } ?? providers[0]
@@ -318,6 +324,7 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func request(_ mood: PetMood) {
+        cancelOutgoingSend(note: "Didn't send.")
         abandonListening()
         visible = true
         paused = false
@@ -346,8 +353,10 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let title = item("Cleo · \(labels[behavior.mood] ?? "Hanging out")")
         title.isEnabled = false
         menu.addItem(title)
-        if captureStarted {
-            menu.addItem(item("Stop and hand the words to \(activeProvider.displayName)", action: #selector(stopTalking)))
+        if pendingWords != nil {
+            menu.addItem(item("Cancel send", action: #selector(cancelSend)))
+        } else if captureStarted {
+            menu.addItem(item("Stop and send to \(activeProvider.displayName)", action: #selector(stopTalking)))
         } else {
             menu.addItem(item("Talk to \(activeProvider.displayName) (⌃⌥Space)", action: #selector(startTalking)))
         }
@@ -385,6 +394,12 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let sleepItem = item("Sleepy hours"); sleepItem.submenu = sleepTimes; menu.addItem(sleepItem)
         menu.addItem(item("Gentle mode · stay put", action: #selector(toggleGentle), checked: defaults.bool(forKey: "gentle")))
         menu.addItem(.separator())
+        menu.addItem(item("Send into Grok Bot", action: #selector(toggleSendOptIn), checked: GrokBotSend.optedIn))
+        menu.addItem(item("Pause before sending", action: #selector(toggleSendPause), checked: GrokBotSend.pauseBeforeSending))
+        let explanation = item("Sending presses Grok Bot's Send button. That needs Accessibility. A draft already in the composer is not sent or replaced.")
+        explanation.isEnabled = false
+        menu.addItem(explanation)
+        menu.addItem(.separator())
         menu.addItem(item("Quit Cleo", action: #selector(quit)))
     }
 
@@ -409,7 +424,25 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         else { beginCapture() }
     }
 
+    @objc private func cancelSend() { cancelOutgoingSend(note: "Didn't send.") }
+    @objc private func toggleSendOptIn() {
+        let enabling = !GrokBotSend.optedIn
+        defaults.set(enabling, forKey: GrokBotSend.optInKey)
+        if enabling {
+            if !GrokBotAccessibility.isTrusted { GrokBotAccessibility.requestPrompt() }
+            handoffNote = GrokBotAccessibility.isTrusted
+                ? "Cleo can press Send in Grok Bot."
+                : "Allow Cleo in System Settings → Privacy & Security → Accessibility. That only lets her press Send."
+        } else {
+            cancelOutgoingSend(note: "Sending into Grok Bot is off.")
+        }
+    }
+    @objc private func toggleSendPause() {
+        defaults.set(!GrokBotSend.pauseBeforeSending, forKey: GrokBotSend.pauseKey)
+    }
+
     private func beginCapture() {
+        cancelOutgoingSend(note: nil)
         guard !captureStarted else { return }
         guard visible, !paused, suspended.isEmpty else { return }
         if !OnDeviceSpeechListener.permissionsGranted {
@@ -460,11 +493,7 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.handoffNote = error.note
             case .success(let words) where deliver && !words.isEmpty:
                 self.behavior.endDictation(now: self.now, acknowledged: true)
-                self.handoffNote = "Handing words to \(self.activeProvider.displayName)…"
-                let provider = self.activeProvider
-                provider.deliver(text: words) { [weak self] outcome in
-                    self?.handoffNote = outcome.note
-                }
+                self.scheduleSend(words)
             case .success:
                 self.behavior.endDictation(now: self.now, acknowledged: false)
                 if deliver { self.handoffNote = "Cleo didn't catch any words." }
@@ -474,8 +503,48 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func scheduleSend(_ words: String) {
+        let preview = words.count > 80 ? String(words.prefix(80)) + "…" : words
+        let blocked = !GrokBotSend.optedIn || !GrokBotAccessibility.isTrusted || GrokBotDrafts.snapshot().selectedDraftOccupied
+        guard GrokBotSend.pauseBeforeSending, !blocked else {
+            handoffNote = blocked ? "Checking Grok Bot…" : "Sending to \(activeProvider.displayName)…"
+            deliverWords(words)
+            return
+        }
+        pendingWords = words
+        handoffNote = "Will send in a moment: \(preview) Choose Cancel send to stop."
+        statusItem.button?.toolTip = "Cleo will send: \(words). Open the paw menu and choose Cancel send to stop."
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.pendingWords == words else { return }
+            self.pendingWords = nil
+            self.pendingSend = nil
+            self.handoffNote = "Sending to \(self.activeProvider.displayName)…"
+            self.deliverWords(words)
+        }
+        pendingSend = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + GrokBotSend.pauseSeconds, execute: work)
+        updateFrame()
+    }
+
+    private func deliverWords(_ words: String) {
+        activeProvider.deliver(text: words) { [weak self] outcome in
+            self?.handoffNote = outcome.note
+            self?.statusItem.button?.toolTip = "Cleo — your little desktop doodle"
+        }
+    }
+
+    private func cancelOutgoingSend(note: String?) {
+        pendingSend?.cancel()
+        pendingSend = nil
+        let hadWords = pendingWords != nil
+        pendingWords = nil
+        if hadWords { handoffNote = note }
+        if hadWords { statusItem.button?.toolTip = "Cleo — your little desktop doodle" }
+    }
+
     /// Stops the microphone without opening another app. Used when a different action takes over.
     private func abandonListening() {
+        cancelOutgoingSend(note: "Didn't send.")
         guard captureStarted || permissionPromptOpen else { return }
         let wasCapturing = captureStarted
         captureStarted = false
@@ -520,7 +589,10 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func wag() { request(.wag) }
     @objc private func sleep() { request(.sleep) }
     @objc private func goHome() { request(.idle) }
-    @objc private func quit() { NSApp.terminate(nil) }
+    @objc private func quit() {
+        cancelOutgoingSend(note: nil)
+        NSApp.terminate(nil)
+    }
     @objc private func changeCorner(_ sender: NSMenuItem) { defaults.set(sender.tag, forKey: "corner"); resetGeometry() }
     @objc private func changeSize(_ sender: NSMenuItem) { defaults.set(sender.tag, forKey: "size"); resetGeometry() }
     @objc private func changeDisplay(_ sender: NSMenuItem) {
@@ -624,6 +696,8 @@ final class CleoApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 "dictating": self.behavior.isDictating, "captureStarted": self.captureStarted,
                 "hotKeyRegistered": self.hotKey.isRegistered,
                 "speechOnDeviceOnly": true, "grokBotInstalled": GrokBotLink.isInstalled,
+                "sendOptIn": GrokBotSend.optedIn, "pauseBeforeSend": GrokBotSend.pauseBeforeSending,
+                "accessibilityTrusted": GrokBotAccessibility.isTrusted,
                 "agentProvider": self.activeProvider.identifier,
                 "hoverEntryConsumed": self.hoverEntryConsumed, "hoverBarkCount": self.hoverBarkCount,
                 "hoverSleepGreetingCount": self.hoverSleepGreetingCount,

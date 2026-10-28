@@ -18,7 +18,7 @@ This is an **ad hoc signed preview, not a Developer ID signed, notarized release
 
 The paw menu controls her size, screen corner, display, sleepy hours, and play. You can hide, pause, snooze, or quit her there. Hover over her while she sits at home for a silent bark and wag; click to pet her. Sleeping Cleo stays curled up and greets a hover with open eyes and a tail wag.
 
-The published **1.0.0 download does not use the microphone or the network**. A build from this source adds hold-to-talk, described under Develop. That build listens only while you hold Cleo, press Control-Option-Space, or choose **Talk to Grok Bot** in the paw menu. It transcribes on this Mac and does not itself send the audio or the transcript anywhere. It still does not request Accessibility, Screen Recording, or Input Monitoring, and it does not start at login automatically.
+The published **1.0.0 download does not use the microphone, Accessibility, or the network**. A build from this source adds hold-to-talk, described under Develop. That build listens only while you hold Cleo, press Control-Option-Space, or choose **Talk to Grok Bot**. Speech stays on this Mac. Sending the words into Grok Bot is off until you turn on **Send into Grok Bot**. That setting needs the Accessibility permission so Cleo can press Send in Grok Bot. Cleo does not request Screen Recording or Input Monitoring, and it does not start at login automatically.
 
 To remove her, choose **Quit Cleo** from the paw menu, then delete the app.
 
@@ -26,9 +26,9 @@ To remove her, choose **Quit Cleo** from the paw menu, then delete the app.
 
 A small native macOS companion inspired by Cleo the goldendoodle, with sharp pixel artwork and animated body, head, tail, and legs. Cleo usually stays near a screen corner, occasionally plays with a ball or carries a stick, and becomes sleepy in the evening. She faces left while resting, with her head and ears anchored during a stationary tail wag. She turns with her direction of travel and faces the pointer during stick play. Click her while she is resting to pet her.
 
-The app uses AppKit, local artwork, and, while you are talking, the microphone and Apple's Speech framework. Speech recognition is requested with on-device recognition required. Cleo does not fall back to Apple's speech servers, and Cleo's process does not open a network connection, account, or telemetry. The transcript is handed to another app on this Mac through a local URL scheme. That other app, Grok Bot, has its own network once you send a message. Cleo does not press send.
+The app uses AppKit, local artwork, and, while you are talking, the microphone and Apple's Speech framework. Speech recognition is requested with on-device recognition required. Cleo does not fall back to Apple's speech servers. Cleo's process does not open a network connection, account, or telemetry.
 
-Cleo requests only the microphone and speech recognition. It does not request Accessibility, Screen Recording, or Input Monitoring permission. It does not start at login automatically. The app has no Dock icon; its menu bar menu is the control center.
+Sending is a separate opt-in. **Send into Grok Bot** is off until you turn it on in the paw menu. Turning it on asks for the macOS **Accessibility** permission (System Settings → Privacy & Security → Accessibility). Cleo uses that permission only to read Grok Bot's composer and press its Send button. She does not use it on any other app. Grok Bot then sends the message on Grok Bot's own network. Cleo does not request Screen Recording or Input Monitoring. It does not start at login automatically. The app has no Dock icon; its menu bar menu is the control center.
 
 ### Build and run
 
@@ -91,31 +91,23 @@ Supported controls are `stick`, `ball`, `wag`, `pet`, `bark`, `sleep`, `home`, `
 
 Cleo is the microphone. Grok Bot, bundle id `com.anysphere.sand`, is the agent. The handoff sits behind `AgentProvider`, so another desktop agent can be added later without rewriting listening or the menu. The only provider today is `GrokBotProvider`. A saved `agentProvider` preference selects one when more than one exists.
 
-Grok Bot 0.75.8 registers `grokbot://` and `sand://`. Both accept the same routes. The prompt route is:
+Grok Bot 0.75.8 has no URL that sends a chat message. `grokbot://app/v1/prompt?text=…` and the same `sand://` route only prefill the main agent's composer. Enter in that composer is ignored (it does not insert a newline and it does not send). Command-Enter is a hotkey that does not run while the composer is focused. The control that sends is the form's **Send message** button.
 
-```text
-grokbot://app/v1/prompt?text=Hello%20there
-sand://app/v1/prompt?text=Hello%20there
-```
+Cleo prefills with that local URL. She presses **Send message** only after you turn on **Send into Grok Bot** and macOS Accessibility is allowed for Cleo. The paw menu explains that before the system prompt appears. If Accessibility is off, she leaves the words in the composer and does not press Send. On Grok Bot 0.75.8 the web composer was not in the accessibility tree (only the app's own chrome buttons were), so a granted permission still does not press Send until that button is exposed. Cleo does not click a guessed spot and does not press Return, because Return does not send. She does not open `https://cursor.com`.
 
-Tested against the installed 0.75.8 app, not guessed from the scheme names:
+A draft that is already in the selected chat is not replaced and is not sent. Cleo also refuses to press Send unless the composer text matches what she heard, or the local draft file changed from empty to that text. If she does not send, the menu says why. When the words never land in the composer, they are copied to the clipboard, which replaces what was on the clipboard.
 
-- The route prefills the main agent's composer. It does not send the message. A draft file on disk gained the probe text, and no sent-message record did.
-- `sand://` with a space in the text prefilled the same way (`CLEO HANDOFF SAND 4594`).
-- A second link, while that draft was non-empty, did not replace it. Grok Bot keeps the existing draft and only focuses the agent. Cleo cannot see that, so the menu says an existing draft is left as it is.
-- A decoded `text` longer than 1000 characters is rejected. The whole URL must be at most 2048 printable ASCII characters, with no fragment, no extra query keys, and no control characters. Cleo collapses newlines to spaces, strips other control characters, shortens the text until the URL fits, and uses `grokbot://`.
-- There is no query flag that sends. Cleo does not open `https://cursor.com`.
-
-If Grok Bot is missing, or the link fails to open, Cleo copies the words to the clipboard and activates Grok Bot when it is installed. That replaces whatever was on the clipboard. The menu states that. This is the fallback, not the normal path.
+**Pause before sending** is on by default. Cleo barks, and the paw menu shows the words for about 2.5 seconds with **Cancel send**. Turn the pause off to send after the bark without the extra wait.
 
 The microphone and speech recognizer run only during a listening session. `requiresOnDeviceRecognition` is set. If on-device recognition cannot run, Cleo stops and does not retry with a server recognizer. The first attempt asks for microphone and speech-recognition permission; those usage strings are in `Info.plist`.
 
-Check the link builder and the listening pose without a microphone or another app:
+Check the link builder, the listening pose, and the send plan without a microphone and without pressing Send:
 
 ```sh
 ./build/Cleo.app/Contents/MacOS/Cleo --self-check
 ./build/Cleo.app/Contents/MacOS/Cleo --print-grok-url "hello world"
 ./build/Cleo.app/Contents/MacOS/Cleo --speech-capability
+./build/Cleo.app/Contents/MacOS/Cleo --send-plan
 ```
 
 ### Performance
@@ -171,6 +163,7 @@ For a Cleo instance started with that `--diagnostics` path, `--command snapshot`
 - `Sources/Cleo/SpeechListener.swift`: on-device microphone transcription.
 - `Sources/Cleo/TalkHotKey.swift`: Control-Option-Space, without Input Monitoring.
 - `Sources/Cleo/AgentProvider.swift`: the provider interface and the Grok Bot link.
+- `Sources/Cleo/GrokBotSend.swift`: draft check, Accessibility opt-in, and the Send button press.
 - `Sources/Cleo/ThrownBallView.swift`: cached pixel artwork for the noninteractive thrown ball.
 - `Resources/`: bundled local pixel artwork and app icon.
 - `Artwork/ARTWORK.md`: selected art, generation method, and exact source prompt.

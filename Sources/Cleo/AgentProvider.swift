@@ -3,15 +3,21 @@ import Foundation
 
 /// Outcome of handing text to one local agent app. Cleo never opens a network connection for this.
 enum AgentHandoffResult {
-    /// The provider's own app opened with the words waiting in its composer.
+    /// Grok Bot's Send button was pressed. Grok Bot delivers the message on its own network.
+    case sent(note: String)
+    /// The composer has the words. Cleo did not press Send.
     case prefilled(note: String)
+    /// A composer draft was already there, so nothing was replaced and nothing was sent.
+    case keptDraft(note: String)
+    case needsOptIn(note: String)
+    case needsAccessibility(note: String)
     /// The link could not be used. The words are on the clipboard instead.
     case clipboardFallback(note: String)
     case failed(note: String)
 
     var note: String {
         switch self {
-        case .prefilled(let note), .clipboardFallback(let note), .failed(let note):
+        case .sent(let note), .prefilled(let note), .keptDraft(let note), .needsOptIn(let note), .needsAccessibility(let note), .clipboardFallback(let note), .failed(let note):
             return note
         }
     }
@@ -102,7 +108,7 @@ enum GrokBotLink {
     }
 }
 
-/// Hands text to the installed Grok Bot app through its local URL scheme.
+/// Fills Grok Bot's main-agent composer, then presses Send. Cleo opens no network connection.
 final class GrokBotProvider: AgentProvider {
     let identifier = "grok-bot"
     let displayName = "Grok Bot"
@@ -113,38 +119,82 @@ final class GrokBotProvider: AgentProvider {
             completion(.failed(note: "Cleo didn't catch any words."))
             return
         }
-        guard let url = GrokBotLink.promptURL(for: words) else {
-            completion(copyToClipboard(words, reason: "Those words could not fit in a Grok Bot link."))
+        guard GrokBotLink.isInstalled else {
+            completion(copy(words, reason: "Grok Bot is not installed.", result: { .clipboardFallback(note: $0) }))
             return
         }
-        guard GrokBotLink.isInstalled else {
-            completion(copyToClipboard(words, reason: "Grok Bot is not installed."))
+        let before = GrokBotDrafts.snapshot()
+        if before.selectedDraftOccupied {
+            completion(copy(words, reason: "Grok Bot already has a draft, so Cleo didn't send or replace it.", result: { .keptDraft(note: $0) }))
+            return
+        }
+        guard let url = GrokBotLink.promptURL(for: words) else {
+            completion(copy(words, reason: "Those words could not fit in a Grok Bot link.", result: { .clipboardFallback(note: $0) }))
             return
         }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
-        // Local URL only. Cleo does not open https://cursor.com or any other network request.
+        // Local URL only. Cleo does not open https://cursor.com.
         NSWorkspace.shared.open(url, configuration: configuration) { application, error in
             DispatchQueue.main.async {
                 if error != nil || application == nil {
-                    completion(self.copyToClipboard(words, reason: "Grok Bot did not open the link."))
-                } else {
-                    completion(.prefilled(note: "In Grok Bot's composer, not sent. An existing draft is left as it is."))
+                    completion(self.copy(words, reason: "Grok Bot did not open the link.", result: { .clipboardFallback(note: $0) }))
+                    return
                 }
+                let pid = application?.processIdentifier
+                    ?? NSRunningApplication.runningApplications(withBundleIdentifier: GrokBotLink.bundleIdentifier).first?.processIdentifier
+                guard GrokBotSend.optedIn else {
+                    completion(.needsOptIn(note: "Words are in Grok Bot's composer, not sent. Turn on Send into Grok Bot. That needs Accessibility."))
+                    return
+                }
+                guard GrokBotAccessibility.isTrusted, let pid else {
+                    completion(.needsAccessibility(note: "Words are in the composer, not sent. Allow Cleo in System Settings → Privacy & Security → Accessibility."))
+                    return
+                }
+                self.confirmThenPress(words: words, before: before, pid: pid, attemptsLeft: 8, completion: completion)
             }
         }
     }
 
-    private func copyToClipboard(_ words: String, reason: String) -> AgentHandoffResult {
+    private func confirmThenPress(words: String, before: GrokBotDraftSnapshot, pid: pid_t, attemptsLeft: Int, completion: @escaping (AgentHandoffResult) -> Void) {
+        let landed = GrokBotDrafts.snapshot().landed(words, comparedWith: before)
+        switch GrokBotAccessibility.look(pid: pid, expected: words) {
+        case .mismatch:
+            completion(copy(words, reason: "Grok Bot kept what was already in the composer, so Cleo didn't send.", result: { .keptDraft(note: $0) }))
+        case .matched where landed || attemptsLeft == 0:
+            completion(press(pid: pid, words: words))
+        case .matched:
+            // The composer shows the words. Give the draft file a moment, then press.
+            retry(words: words, before: before, pid: pid, attemptsLeft: attemptsLeft, completion: completion)
+        case .waiting, .unreadable:
+            if attemptsLeft > 0 {
+                retry(words: words, before: before, pid: pid, attemptsLeft: attemptsLeft, completion: completion)
+            } else if landed {
+                completion(.prefilled(note: "Words are in Grok Bot's composer. Send wasn't visible to Accessibility, so Cleo didn't press it."))
+            } else {
+                completion(copy(words, reason: "Cleo couldn't confirm an empty composer, so she didn't send.", result: { .keptDraft(note: $0) }))
+            }
+        }
+    }
+
+    private func retry(words: String, before: GrokBotDraftSnapshot, pid: pid_t, attemptsLeft: Int, completion: @escaping (AgentHandoffResult) -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.confirmThenPress(words: words, before: before, pid: pid, attemptsLeft: attemptsLeft - 1, completion: completion)
+        }
+    }
+
+    private func press(pid: pid_t, words: String) -> AgentHandoffResult {
+        if GrokBotAccessibility.pressSend(pid: pid) {
+            return .sent(note: "Sent to Grok Bot.")
+        }
+        return .prefilled(note: "Words are in Grok Bot's composer. Cleo couldn't press Send, so she didn't.")
+    }
+
+    private func copy(_ words: String, reason: String, result: (String) -> AgentHandoffResult) -> AgentHandoffResult {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(words, forType: .string)
-        if let application = NSWorkspace.shared.urlForApplication(withBundleIdentifier: GrokBotLink.bundleIdentifier) {
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = true
-            NSWorkspace.shared.openApplication(at: application, configuration: configuration) { _, _ in }
-        }
-        return .clipboardFallback(note: "\(reason) The words are on the clipboard.")
+        return result("\(reason) The words are on the clipboard.")
     }
 }
 
@@ -200,5 +250,20 @@ func cleoSelfCheck() -> Bool {
     sleepy.endDictation(now: 6, acknowledged: true)
     sleepy.tick(now: 7.2, mouse: nil, evening: true, reducedMotion: true)
     check("back to sleep", sleepy.mood == .sleep && abs(sleepy.position.x - sleepSpot.x) < 0.01)
+
+    let roundTrip = "sand.client.slice.ui-layout"
+    let encoded = Base32.encode(Data(roundTrip.utf8))
+    check("base32", String(data: Base32.decode(encoded) ?? Data(), encoding: .utf8) == roundTrip)
+    let empty: [String: Any] = ["draft": ["prompt": "  ", "attachments": []], "recovery": NSNull()]
+    check("blank draft", GrokBotDrafts.occupied(empty) == false)
+    let typing: [String: Any] = ["draft": ["prompt": "hello", "attachments": []], "recovery": NSNull()]
+    check("typing draft", GrokBotDrafts.occupied(typing) && GrokBotDrafts.prompt(of: typing) == "hello")
+    let reply: [String: Any] = ["draft": ["prompt": "", "attachments": [], "replyToId": "abc"]]
+    check("reply draft", GrokBotDrafts.occupied(reply))
+    let previous = GrokBotDraftSnapshot(records: [.init(agentID: "a", prompt: "", occupied: false)], selectedAgentID: "a")
+    let filled = GrokBotDraftSnapshot(records: [.init(agentID: "a", prompt: "hello", occupied: true)], selectedAgentID: "a")
+    check("landed", filled.landed("hello", comparedWith: previous))
+    let kept = GrokBotDraftSnapshot(records: [.init(agentID: "a", prompt: "mine", occupied: true)], selectedAgentID: "a")
+    check("kept draft", filled.landed("hello", comparedWith: kept) == false && kept.selectedDraftOccupied)
     return failed == 0
 }
